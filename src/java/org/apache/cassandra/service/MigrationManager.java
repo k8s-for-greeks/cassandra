@@ -59,10 +59,8 @@ public class MigrationManager
 
     public static final int MIGRATION_DELAY_IN_MS = 60000;
 
-    private static final int MIGRATION_TASK_WAIT_IN_SECONDS = Integer.parseInt(System.getProperty("cassandra.migration_task_wait_in_seconds", "1"));
-
     private final List<MigrationListener> listeners = new CopyOnWriteArrayList<>();
-
+    
     private MigrationManager() {}
 
     public void register(MigrationListener listener)
@@ -150,25 +148,7 @@ public class MigrationManager
 
     public static boolean isReadyForBootstrap()
     {
-        return MigrationTask.getInflightTasks().isEmpty();
-    }
-
-    public static void waitUntilReadyForBootstrap()
-    {
-        CountDownLatch completionLatch;
-        while ((completionLatch = MigrationTask.getInflightTasks().poll()) != null)
-        {
-            try
-            {
-                if (!completionLatch.await(MIGRATION_TASK_WAIT_IN_SECONDS, TimeUnit.SECONDS))
-                    logger.error("Migration task failed to complete");
-            }
-            catch (InterruptedException e)
-            {
-                Thread.currentThread().interrupt();
-                logger.error("Migration task was interrupted");
-            }
-        }
+        return ((ThreadPoolExecutor) StageManager.getStage(Stage.MIGRATION)).getActiveCount() == 0;
     }
 
     public void notifyCreateKeyspace(KeyspaceMetadata ksm)
@@ -394,12 +374,12 @@ public class MigrationManager
         announce(SchemaKeyspace.makeCreateKeyspaceMutation(ksm.name, ksm.params, FBUtilities.timestampMicros()), announceLocally);
     }
 
-    public static void announceColumnFamilyUpdate(CFMetaData cfm) throws ConfigurationException
+    public static void announceColumnFamilyUpdate(CFMetaData cfm, boolean fromThrift) throws ConfigurationException
     {
-        announceColumnFamilyUpdate(cfm, false);
+        announceColumnFamilyUpdate(cfm, fromThrift, false);
     }
 
-    public static void announceColumnFamilyUpdate(CFMetaData cfm, boolean announceLocally) throws ConfigurationException
+    public static void announceColumnFamilyUpdate(CFMetaData cfm, boolean fromThrift, boolean announceLocally) throws ConfigurationException
     {
         cfm.validate();
 
@@ -408,10 +388,10 @@ public class MigrationManager
             throw new ConfigurationException(String.format("Cannot update non existing table '%s' in keyspace '%s'.", cfm.cfName, cfm.ksName));
         KeyspaceMetadata ksm = Schema.instance.getKSMetaData(cfm.ksName);
 
-        oldCfm.validateCompatibility(cfm);
+        oldCfm.validateCompatility(cfm);
 
         logger.info(String.format("Update table '%s/%s' From %s To %s", cfm.ksName, cfm.cfName, oldCfm, cfm));
-        announce(SchemaKeyspace.makeUpdateTableMutation(ksm, oldCfm, cfm, FBUtilities.timestampMicros()), announceLocally);
+        announce(SchemaKeyspace.makeUpdateTableMutation(ksm, oldCfm, cfm, FBUtilities.timestampMicros(), fromThrift), announceLocally);
     }
 
     public static void announceViewUpdate(ViewDefinition view, boolean announceLocally) throws ConfigurationException
@@ -423,7 +403,7 @@ public class MigrationManager
             throw new ConfigurationException(String.format("Cannot update non existing materialized view '%s' in keyspace '%s'.", view.viewName, view.ksName));
         KeyspaceMetadata ksm = Schema.instance.getKSMetaData(view.ksName);
 
-        oldView.metadata.validateCompatibility(view.metadata);
+        oldView.metadata.validateCompatility(view.metadata);
 
         logger.info(String.format("Update view '%s/%s' From %s To %s", view.ksName, view.viewName, oldView, view));
         announce(SchemaKeyspace.makeUpdateViewMutation(ksm, oldView, view, FBUtilities.timestampMicros()), announceLocally);
@@ -431,7 +411,6 @@ public class MigrationManager
 
     public static void announceTypeUpdate(UserType updatedType, boolean announceLocally)
     {
-        logger.info(String.format("Update type '%s.%s' to %s", updatedType.keyspace, updatedType.getNameAsString(), updatedType));
         announceNewType(updatedType, announceLocally);
     }
 
